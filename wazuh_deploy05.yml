@@ -1,0 +1,47 @@
+---
+- name: Deploy Wazuh agent to Windows
+  hosts: windows_winrm
+  gather_facts: no
+
+  vars:
+    wazuh_manager: "10.51.3.15"
+    wazuh_msi_url: "https://packages.wazuh.com/4.x/windows/wazuh-agent-4.14.1-1.msi"
+    remote_temp_path: "C:\\Temp"
+    wazuh_msi_file: "wazuh-agent.msi"
+    install_log: "C:\\Temp\\wazuh_install.log"
+
+  tasks:
+
+    - name: Ensure C:\Temp exists
+      ansible.windows.win_file:
+        path: "{{ remote_temp_path }}"
+        state: directory
+
+    - name: Get hostname cleanly
+      ansible.windows.win_command: hostname
+      register: hostname_result
+
+    - name: Set agent name
+      set_fact:
+        wazuh_agent_name: "{{ hostname_result.stdout | trim }}"
+
+    - name: Download Wazuh agent MSI
+      ansible.windows.win_get_url:
+        url: "{{ wazuh_msi_url }}"
+        dest: "{{ remote_temp_path }}\\{{ wazuh_msi_file }}"
+        force: yes
+
+    - name: Install Wazuh agent using raw msiexec (WINNER)
+      ansible.windows.win_shell: |
+        msiexec.exe /i "{{ remote_temp_path }}\{{ wazuh_msi_file }}" `
+        WAZUH_MANAGER="{{ wazuh_manager }}" `
+        WAZUH_AGENT_NAME="{{ wazuh_agent_name }}" `
+        /qn /norestart /L*V "{{ install_log }}"
+      args:
+        executable: powershell.exe
+
+    - name: Ensure Wazuh agent service is running
+      ansible.windows.win_service:
+        name: WazuhSvc
+        state: started
+        start_mode: auto
