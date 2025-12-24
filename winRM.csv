@@ -1,0 +1,4 @@
+hostname,ip
+mydc1wd01,10.51.0.99
+mydc1wd03,10.51.3.99
+mydc1wd04,10.51.0.98
