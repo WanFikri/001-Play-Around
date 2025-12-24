@@ -1,5 +1,5 @@
 ---
-- name: Update Zabbix Agent 2 on Windows hosts
+- name: Install or Upgrade Zabbix Agent 2 on Windows
   hosts: windows_winrm
   gather_facts: no
 
@@ -7,113 +7,156 @@
     - group_vars/zabbix_vault.yml
 
   vars:
-    # --- Update Info ---
-    zabbix_new_msi: "zabbix_agent2-7.4.4-windows-amd64-openssl.msi"
-    zabbix_new_msi_checksum: "b83f1b600a75127fad7d7d271baf8c7da3922d6fcb591f2e777fb61b32d45a80"
+    # -----------------------------
+    # Package Information
+    # -----------------------------
+    zabbix_msi: "zabbix_agent2-7.4.4-windows-amd64-openssl.msi"
+    zabbix_version: "7.4.4"
+    zabbix_msi_checksum: "b83f1b600a75127fad7d7d271baf8c7da3922d6fcb591f2e777fb61b32d45a80"
 
-    # --- Existing Configuration ---
+    # -----------------------------
+    # Paths
+    # -----------------------------
+    network_share: "\\\\MYDC1WD04\\installer\\zabbix_withproxy"
+    remote_temp: "C:\\Temp"
+    install_log: "C:\\Temp\\zabbix_install.log"
+    zabbix_install_path: "C:\\Program Files\\Zabbix Agent 2"
+
+    # -----------------------------
+    # Zabbix Settings
+    # -----------------------------
     zabbix_server: "zbx.ytlcement.internal"
     zabbix_serveractive: "zbx.ytlcement.internal"
     tls_psk_identity: "YTLDCZBX01"
-    network_share: "\\\\MYDC1WD04\\installer\\zabbix_withproxy"
-    remote_temp_path: "C:\\Temp"
-    install_log: "C:\\Temp\\zabbix_update.log"
-    zabbix_install_path: "C:\\Program Files\\Zabbix Agent 2"
 
   tasks:
-    - name: Get installed Zabbix Agent 2 version from registry
+    # ============================================================
+    # 1. Detect existing Zabbix Agent installation (safe)
+    # ============================================================
+    - name: Detect installed Zabbix Agent version (if any)
       ansible.windows.win_shell: |
-        Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*" |
-        Where-Object { $_.DisplayName -like "Zabbix Agent*" } |
-        Select-Object -ExpandProperty DisplayVersion
-      register: zabbix_installed_version
+        $pkg = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*" `
+          -ErrorAction SilentlyContinue |
+          Where-Object { $_.DisplayName -like "Zabbix Agent*" } |
+          Select-Object -First 1 -ExpandProperty DisplayVersion
+
+        if ($pkg) { Write-Output $pkg }
+      register: zabbix_detect
       changed_when: false
       failed_when: false
 
-    - name: Normalize installed version fact
+    - name: Set installed version fact
       set_fact:
-        installed_version: "{{ (zabbix_installed_version.stdout | trim) if zabbix_installed_version.stdout != '' else 'none' }}"
+        installed_version: "{{ zabbix_detect.stdout | trim | default('none', true) }}"
 
-    - name: Set new version fact from MSI filename (e.g., 7.4.4)
+    # ============================================================
+    # 2. Decide install mode (install / upgrade / skip)
+    # ============================================================
+    - name: Decide installation mode
       set_fact:
-        zabbix_new_version: "{{ (zabbix_new_msi.split('-')[1]) | default('unknown') }}"
+        install_mode: >-
+          {% if installed_version == 'none' %}
+          install
+          {% elif installed_version != zabbix_version %}
+          upgrade
+          {% else %}
+          skip
+          {% endif %}
 
-    - name: Display current and new versions
+    - name: Show decision
       debug:
-        msg: "Current version: {{ installed_version }}, attempting to upgrade to: {{ zabbix_new_version }}"
+        msg:
+          - "Installed version : {{ installed_version }}"
+          - "Target version    : {{ zabbix_version }}"
+          - "Action            : {{ install_mode }}"
 
-    # -----------------------------
-    # Perform upgrade if version differs
-    # -----------------------------
-    - name: Perform Update
-      block:
+    # ============================================================
+    # 3. Prepare system (only if needed)
+    # ============================================================
+    - name: Ensure temp directory exists
+      ansible.windows.win_file:
+        path: "{{ remote_temp }}"
+        state: directory
+      when: install_mode != 'skip'
 
-        - name: Ensure C:\Temp directory exists
-          ansible.windows.win_file:
-            path: "{{ remote_temp_path }}"
-            state: directory
+    - name: Copy Zabbix MSI from network share
+      ansible.windows.win_copy:
+        src: "{{ network_share }}\\{{ zabbix_msi }}"
+        dest: "{{ remote_temp }}\\{{ zabbix_msi }}"
+        remote_src: yes
+      when: install_mode != 'skip'
 
-        - name: Copy new Zabbix Agent MSI from network share
-          ansible.windows.win_copy:
-            src: "{{ network_share }}\\{{ zabbix_new_msi }}"
-            dest: "{{ remote_temp_path }}\\{{ zabbix_new_msi }}"
-            remote_src: yes
+    - name: Verify MSI checksum
+      ansible.windows.win_shell: |
+        $hash = (Get-FileHash "{{ remote_temp }}\\{{ zabbix_msi }}" -Algorithm SHA256).Hash.ToLower()
+        if ($hash -ne "{{ zabbix_msi_checksum }}") {
+          Write-Error "Checksum mismatch: $hash"
+          exit 1
+        }
+      when: install_mode != 'skip'
+      changed_when: false
 
-        - name: Verify checksum of the new installer via PowerShell
-          ansible.windows.win_shell: |
-            $path = "{{ remote_temp_path }}\\{{ zabbix_new_msi }}"
-            $hash = (Get-FileHash -Path $path -Algorithm SHA256).Hash.ToLower()
-            if ($hash -ne "{{ zabbix_new_msi_checksum }}") {
-              Write-Host "Checksum mismatch! Expected {{ zabbix_new_msi_checksum }}, got $hash"
-              exit 1
-            } else {
-              Write-Host "Checksum OK: $hash"
-            }
-          register: checksum_result
-          changed_when: false
+    # ============================================================
+    # 4. Stop service only during upgrade
+    # ============================================================
+    - name: Stop Zabbix Agent service (upgrade only)
+      ansible.windows.win_service:
+        name: "Zabbix Agent 2"
+        state: stopped
+      when: install_mode == 'upgrade'
 
-        - name: Stop Zabbix Agent 2 service before upgrade
-          ansible.windows.win_service:
-            name: "Zabbix Agent 2"
-            state: stopped
+    # ============================================================
+    # 5. Install or Upgrade Zabbix Agent
+    # ============================================================
+    - name: Install / Upgrade Zabbix Agent 2
+      ansible.windows.win_package:
+        path: "{{ remote_temp }}\\{{ zabbix_msi }}"
+        state: present
+        arguments: >
+          /qn /norestart
+          /l*v "{{ install_log }}"
+          SERVER={{ zabbix_server }}
+          SERVERACTIVE={{ zabbix_serveractive }}
+          TLSCONNECT=psk
+          TLSACCEPT=psk
+          TLSPSKIDENTITY={{ tls_psk_identity }}
+          TLSPSKVALUE={{ tls_psk_value }}
+          ENABLEPATH=1
+          HOSTNAME={{ ansible_hostname | default(inventory_hostname) }}
+      when: install_mode in ['install', 'upgrade']
 
-        - name: Upgrade Zabbix Agent 2 using the new MSI
-          ansible.windows.win_package:
-            path: "{{ remote_temp_path }}\\{{ zabbix_new_msi }}"
-            state: present
-            arguments: >
-              /l*v "{{ install_log }}"
-              /qn /norestart
-              SERVER={{ zabbix_server }}
-              SERVERACTIVE={{ zabbix_serveractive }}
-              TLSCONNECT=psk
-              TLSACCEPT=psk
-              TLSPSKIDENTITY={{ tls_psk_identity }}
-              TLSPSKVALUE={{ tls_psk_value }}
-              ENABLEPATH=1
-              HOSTNAME={{ ansible_hostname | default(inventory_hostname) }}
-            log_path: "{{ install_log }}"
+    # ============================================================
+    # 6. Deploy configuration
+    # ============================================================
+    - name: Copy zabbix_agent2.conf
+      ansible.windows.win_copy:
+        src: "{{ network_share }}\\zabbix_agent2.conf"
+        dest: "{{ zabbix_install_path }}\\zabbix_agent2.conf"
+        remote_src: yes
+      when: install_mode != 'skip'
 
-        - name: Ensure Zabbix Agent 2 service is running and set to auto
-          ansible.windows.win_service:
-            name: "Zabbix Agent 2"
-            start_mode: auto
-            state: started
+    # ============================================================
+    # 7. Ensure service running
+    # ============================================================
+    - name: Ensure Zabbix Agent service is running
+      ansible.windows.win_service:
+        name: "Zabbix Agent 2"
+        start_mode: auto
+        state: started
+      when: install_mode != 'skip'
 
-        - name: Copy zabbix_agent2.conf to installation path
-          ansible.windows.win_copy:
-            src: "{{ network_share }}\\zabbix_agent2.conf"
-            dest: "{{ zabbix_install_path }}\\zabbix_agent2.conf"
-            remote_src: yes
+    # ============================================================
+    # 8. Post-install validation
+    # ============================================================
+    - name: Validate Zabbix Agent
+      ansible.windows.win_command: >
+        "{{ zabbix_install_path }}\\zabbix_agent2.exe" -t agent.ping
+      register: zabbix_test
+      changed_when: false
+      failed_when: "'[s|1]' not in zabbix_test.stdout"
+      when: install_mode != 'skip'
 
-        - name: Verify Zabbix Agent 2 functionality after upgrade
-          ansible.windows.win_command: '"{{ zabbix_install_path }}\zabbix_agent2.exe" -t agent.ping'
-          register: zabbix_agent_test
-          changed_when: false
-          failed_when: "'[s|1]' not in zabbix_agent_test.stdout"
-
-        - name: Show update result
-          debug:
-            msg: "✅ Zabbix Agent 2 successfully updated to {{ zabbix_new_version }} and is responding."
-
-      when: installed_version != zabbix_new_version
+    - name: Final status
+      debug:
+        msg: "✅ Zabbix Agent {{ zabbix_version }} {{ install_mode }} completed successfully."
+      when: install_mode != 'skip'
