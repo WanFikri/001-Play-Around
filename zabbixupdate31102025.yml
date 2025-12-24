@@ -54,11 +54,11 @@
     # ============================================================
     - name: Decide installation mode
       set_fact:
-      install_mode: "{{ 'install'
+        install_mode: "{{ 'install'
         if installed_version == 'none'
-        else 'upgrade'
+         else 'upgrade'
         if installed_version != zabbix_version
-        else 'skip' }}"
+         else 'skip' }}"
 
     - name: Show decision
       debug:
