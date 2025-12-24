@@ -130,7 +130,16 @@
         src: "{{ network_share }}\\zabbix_agent2.conf"
         dest: "{{ zabbix_install_path }}\\zabbix_agent2.conf"
         remote_src: yes
+      register: zabbix_conf
       when: install_mode != 'skip'
+
+    - name: Restart Zabbix Agent service if config changed
+      ansible.windows.win_service:
+        name: "Zabbix Agent 2"
+        state: restarted
+      when:
+        - install_mode != 'skip'
+        - zabbix_conf.changed
 
     # ============================================================
     # 7. Ensure service running
