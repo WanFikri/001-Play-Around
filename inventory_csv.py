@@ -1,43 +1,30 @@
 #!/usr/bin/env python3
 
-import csv
 import json
+import csv
+import os
 
-inventory = {
-    "_meta": {
-        "hostvars": {}
-    },
-    "windows_winrm": {
-        "hosts": []
-    },
-    "linux": {
-        "hosts": []
+def get_inventory():
+    inventory = {
+        'windows_winrm': {'hosts': []},
+        '_meta': {'hostvars': {}}
     }
-}
 
-CSV_FILE = "winRM.csv"
+    csv_path = 'winRM.csv'
 
-with open(CSV_FILE, newline="") as f:
-    reader = csv.DictReader(f)
+    if os.path.exists(csv_path):
+        with open(csv_path, mode='r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                host = row['hostname'].strip()
+                ip = row['ip'].strip()
 
-    for row in reader:
-        hostname = row["hostname"].strip()
-        ip = row["ip"].strip()
+                inventory['windows_winrm']['hosts'].append(host)
+                inventory['_meta']['hostvars'][host] = {
+                    'ansible_host': ip
+                }
 
-        if not hostname or not ip:
-            continue
+    return inventory
 
-        if hostname.lower().startswith("win"):
-            group = "windows_winrm"
-        elif hostname.lower().startswith("lin"):
-            group = "linux"
-        else:
-            continue
-
-        inventory[group]["hosts"].append(hostname)
-
-        inventory["_meta"]["hostvars"][hostname] = {
-            "ansible_host": ip
-        }
-
-print(json.dumps(inventory, indent=2))
+if __name__ == "__main__":
+    print(json.dumps(get_inventory(), indent=2))
